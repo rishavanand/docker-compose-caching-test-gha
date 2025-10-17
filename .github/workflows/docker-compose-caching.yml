@@ -113,9 +113,23 @@ jobs:
 
       - name: Build with Docker Compose (with cache)
         run: |
-          DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 \
-          docker compose build \
-            --build-arg BUILDKIT_INLINE_CACHE=1
+          # Export buildx builder to use with docker compose
+          docker buildx create --use --name=compose-builder --driver=docker-container || true
+          docker buildx use compose-builder
+
+          # Build using buildx with cache
+          docker buildx bake \
+            --file docker-compose.yml \
+            --set "*.cache-from=type=local,src=/tmp/.buildx-cache" \
+            --set "*.cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max" \
+            --load
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          if [ -d /tmp/.buildx-cache-new ]; then
+            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          fi
 
       - name: Start services
         run: docker compose up -d
