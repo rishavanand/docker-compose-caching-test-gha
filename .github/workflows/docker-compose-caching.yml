@@ -135,7 +135,13 @@ jobs:
           echo "Counter response: $response"
 
           # Verify worker is running
-          docker compose logs worker | grep -q "Worker starting" || exit 1
+          if docker compose ps worker | grep -q "running"; then
+            echo "Worker container is running"
+          else
+            echo "Worker container is not running!"
+            docker compose logs worker
+            exit 1
+          fi
 
           echo "All integration tests passed!"
 
