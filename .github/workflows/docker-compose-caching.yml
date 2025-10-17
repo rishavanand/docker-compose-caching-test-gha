@@ -1,0 +1,152 @@
+name: Docker Compose Caching Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers for web service
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-web
+          key: ${{ runner.os }}-buildx-web-${{ hashFiles('web/Dockerfile', 'web/package*.json') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-web-
+
+      - name: Cache Docker layers for worker service
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-worker
+          key: ${{ runner.os }}-buildx-worker-${{ hashFiles('worker/Dockerfile', 'worker/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-worker-
+
+      - name: Build web service with cache
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: false
+          load: true
+          tags: web-service:latest
+          cache-from: type=local,src=/tmp/.buildx-cache-web
+          cache-to: type=local,dest=/tmp/.buildx-cache-web-new,mode=max
+
+      - name: Build worker service with cache
+        uses: docker/build-push-action@v5
+        with:
+          context: ./worker
+          file: ./worker/Dockerfile
+          push: false
+          load: true
+          tags: worker-service:latest
+          cache-from: type=local,src=/tmp/.buildx-cache-worker
+          cache-to: type=local,dest=/tmp/.buildx-cache-worker-new,mode=max
+
+      # Move cache to prevent unbounded growth
+      - name: Move web cache
+        run: |
+          rm -rf /tmp/.buildx-cache-web
+          mv /tmp/.buildx-cache-web-new /tmp/.buildx-cache-web
+
+      - name: Move worker cache
+        run: |
+          rm -rf /tmp/.buildx-cache-worker
+          mv /tmp/.buildx-cache-worker-new /tmp/.buildx-cache-worker
+
+      - name: Start services with Docker Compose
+        run: docker compose up -d
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for services to start..."
+          sleep 10
+
+      - name: Check services are running
+        run: docker compose ps
+
+      - name: Test web service
+        run: |
+          echo "Testing web service health endpoint..."
+          curl -f http://localhost:3000/health || exit 1
+          echo "Testing counter endpoint..."
+          curl -f http://localhost:3000/counter || exit 1
+
+      - name: Check logs
+        if: always()
+        run: docker compose logs
+
+      - name: Stop services
+        if: always()
+        run: docker compose down
+
+  build-with-compose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-compose-${{ hashFiles('**/Dockerfile', '**/package*.json', '**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-compose-
+
+      - name: Build with Docker Compose (with cache)
+        run: |
+          DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 \
+          docker compose build \
+            --build-arg BUILDKIT_INLINE_CACHE=1
+
+      - name: Start services
+        run: docker compose up -d
+
+      - name: Wait for services
+        run: sleep 10
+
+      - name: Run integration tests
+        run: |
+          echo "Running integration tests..."
+
+          # Test web service
+          curl -f http://localhost:3000/health
+
+          # Test Redis connectivity through web service
+          response=$(curl -s http://localhost:3000/counter)
+          echo "Counter response: $response"
+
+          # Verify worker is running
+          docker compose logs worker | grep -q "Worker starting" || exit 1
+
+          echo "All integration tests passed!"
+
+      - name: Display cache statistics
+        run: |
+          echo "Docker images:"
+          docker images
+          echo ""
+          echo "Docker system df:"
+          docker system df
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
